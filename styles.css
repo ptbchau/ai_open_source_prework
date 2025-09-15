@@ -1,0 +1,16 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: #000; /* helps visualize canvas bounds when image smaller than viewport */
+}
+
+#world-canvas {
+  display: block; /* removes inline gap */
+  width: 100vw;
+  height: 100vh;
+}
+
+
