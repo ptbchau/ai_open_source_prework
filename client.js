@@ -277,8 +277,10 @@ function updateMovement(deltaTime) {
     state.me.y += dy;
   }
   
-  // Update avatar frame based on facing direction
-  updateAvatarFrame();
+  // Update avatar frame based on facing direction (only if changed)
+  if (state.pressedKeys.size > 0) {
+    updateAvatarFrame();
+  }
   
   requestRender();
 }
@@ -289,9 +291,22 @@ function clearMovement() {
 }
 
 function updateAvatarFrame() {
-  if (!state.me.avatarName || !state.avatars.has(state.me.avatarName)) return;
+  if (!state.me.avatarName) {
+    console.warn(`My avatar missing: no avatar name`);
+    return;
+  }
   
-  const avatarDef = state.avatars.get(state.me.avatarName);
+  // Try to get avatar definition, with fallback to 'default' if the specific avatar doesn't exist
+  let avatarDef = state.avatars.get(state.me.avatarName);
+  if (!avatarDef && state.avatars.has('default')) {
+    console.log(`Using fallback avatar 'default' instead of '${state.me.avatarName}'`);
+    avatarDef = state.avatars.get('default');
+  }
+  
+  if (!avatarDef) {
+    console.warn(`My avatar missing: name=${state.me.avatarName}, hasAvatar=${state.avatars.has(state.me.avatarName)}`);
+    return;
+  }
   const facing = state.me.facing;
   const frameIndex = state.me.animationFrame;
   
@@ -303,6 +318,11 @@ function updateAvatarFrame() {
   } else {
     const frames = avatarDef.frames[facing] || [];
     frameUrl = frames[frameIndex] || frames[0] || null;
+  }
+  
+  if (!frameUrl) {
+    console.warn(`My avatar has no frame for facing: ${facing}, frame: ${frameIndex}`);
+    return;
   }
   
   if (frameUrl && frameUrl !== state.me.avatarUrl) {
@@ -319,9 +339,29 @@ function updateAllPlayerFrames() {
 }
 
 function updatePlayerFrame(player) {
-  if (!player.avatarName || !state.avatars.has(player.avatarName)) return;
+  if (!player.avatarName) {
+    console.warn(`Player ${player.username} has no avatar name`);
+    return;
+  }
   
-  const avatarDef = state.avatars.get(player.avatarName);
+  // Try to get avatar definition, with fallback to 'default' if the specific avatar doesn't exist
+  let avatarDef = state.avatars.get(player.avatarName);
+  if (!avatarDef) {
+    console.log(`Player ${player.username} avatar '${player.avatarName}' not found. Available avatars:`, Array.from(state.avatars.keys()));
+    // Try to find any available avatar as fallback
+    const availableAvatars = Array.from(state.avatars.keys());
+    if (availableAvatars.length > 0) {
+      const fallbackAvatar = availableAvatars[0]; // Use first available avatar
+      console.log(`Player ${player.username} using fallback avatar '${fallbackAvatar}' instead of '${player.avatarName}'`);
+      avatarDef = state.avatars.get(fallbackAvatar);
+    }
+  }
+  
+  if (!avatarDef) {
+    console.warn(`Player ${player.username} has missing avatar: ${player.avatarName} and no default fallback`);
+    console.log(`Available avatars:`, Array.from(state.avatars.keys()));
+    return;
+  }
   const facing = player.facing;
   const frameIndex = player.animationFrame;
   
@@ -335,10 +375,44 @@ function updatePlayerFrame(player) {
     frameUrl = frames[frameIndex] || frames[0] || null;
   }
   
+  if (!frameUrl) {
+    console.warn(`Player ${player.username} has no frame for facing: ${facing}, frame: ${frameIndex}`);
+    return;
+  }
+  
   if (frameUrl && frameUrl !== player.avatarUrl) {
-    player.avatarUrl = frameUrl;
-    // Preload the new frame
-    loadImageCached(frameUrl);
+    // Check if the frame URL looks corrupted (too short for a valid image)
+    if (frameUrl.startsWith('data:image/') && frameUrl.length < 1000) {
+      console.warn(`Player ${player.username} has corrupted avatar frame (too short: ${frameUrl.length} chars), using fallback`);
+      // Use default avatar as fallback
+      const defaultAvatar = state.avatars.get('default');
+      if (defaultAvatar && defaultAvatar.frames) {
+        const defaultFrames = defaultAvatar.frames[facing] || defaultAvatar.frames['south'] || [];
+        frameUrl = defaultFrames[frameIndex] || defaultFrames[0] || null;
+        if (frameUrl) {
+          console.log(`Player ${player.username} using default avatar fallback`);
+        }
+      }
+    }
+    
+    if (frameUrl) {
+      player.avatarUrl = frameUrl;
+      // Preload the new frame
+      loadImageCached(frameUrl).catch(err => {
+        console.warn(`Failed to load avatar frame for ${player.username}:`, err);
+        // Try default avatar as final fallback
+        const defaultAvatar = state.avatars.get('default');
+        if (defaultAvatar && defaultAvatar.frames) {
+          const defaultFrames = defaultAvatar.frames[facing] || defaultAvatar.frames['south'] || [];
+          const fallbackUrl = defaultFrames[frameIndex] || defaultFrames[0] || null;
+          if (fallbackUrl) {
+            console.log(`Player ${player.username} using default avatar after load failure`);
+            player.avatarUrl = fallbackUrl;
+            loadImageCached(fallbackUrl);
+          }
+        }
+      });
+    }
   }
 }
 
@@ -410,7 +484,14 @@ function render() {
   const allPlayers = [state.me, ...Array.from(state.players.values())];
   
   for (const player of allPlayers) {
-    if (!player.avatarUrl || !avatarImageCache.has(player.avatarUrl)) continue;
+    if (!player.avatarUrl) {
+      console.warn(`Player ${player.username} has no avatarUrl`);
+      continue;
+    }
+    if (!avatarImageCache.has(player.avatarUrl)) {
+      console.warn(`Player ${player.username} avatar not loaded yet: ${player.avatarUrl}`);
+      continue;
+    }
     
     // Viewport culling - only draw players visible on screen
     const screenX = Math.round(player.x - camX);
@@ -559,8 +640,12 @@ function connectWebSocket() {
             }
           }
           
+          
           // Set initial avatar frames for all players
           updateAllPlayerFrames();
+          
+          // Ensure my avatar frame is set
+          updateAvatarFrame();
           
           // No explicit size -> render at natural size while preserving aspect ratio
           state.me.avatarWidth = undefined;
