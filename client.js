@@ -51,6 +51,7 @@ const state = {
   lastFrameTime: 0,
   moveSpeed: 200, // pixels per second
   avatars: new Map(), // avatarName -> {frames: {north: [...], south: [...], east: [...]}}
+  lastStopTime: 0, // Track when we last stopped moving
 };
 
 function setCanvasSize() {
@@ -234,6 +235,7 @@ function sendStop() {
   if (!state.connected || !socket) return;
   const message = { action: 'stop' };
   socket.send(JSON.stringify(message));
+  state.lastStopTime = Date.now();
 }
 
 function updateMovement(deltaTime) {
@@ -310,6 +312,36 @@ function updateAvatarFrame() {
   }
 }
 
+function updateAllPlayerFrames() {
+  for (const [playerId, player] of state.players) {
+    updatePlayerFrame(player);
+  }
+}
+
+function updatePlayerFrame(player) {
+  if (!player.avatarName || !state.avatars.has(player.avatarName)) return;
+  
+  const avatarDef = state.avatars.get(player.avatarName);
+  const facing = player.facing;
+  const frameIndex = player.animationFrame;
+  
+  let frameUrl = null;
+  if (facing === 'west') {
+    // Use east frame and flip horizontally
+    const eastFrames = avatarDef.frames['east'] || [];
+    frameUrl = eastFrames[frameIndex] || eastFrames[0] || null;
+  } else {
+    const frames = avatarDef.frames[facing] || [];
+    frameUrl = frames[frameIndex] || frames[0] || null;
+  }
+  
+  if (frameUrl && frameUrl !== player.avatarUrl) {
+    player.avatarUrl = frameUrl;
+    // Preload the new frame
+    loadImageCached(frameUrl);
+  }
+}
+
 function render() {
   if (!needsRender) return;
   needsRender = false;
@@ -374,20 +406,30 @@ function render() {
     );
   }
 
-  // Draw my avatar only (for this milestone)
-  const me = state.me;
-  if (me.avatarUrl && avatarImageCache.has(me.avatarUrl)) {
-    const flipHorizontal = me.facing === 'west';
-    const surface = getAvatarSurface(me.avatarUrl, me.avatarWidth, me.avatarHeight, flipHorizontal);
+  // Draw all players (including me)
+  const allPlayers = [state.me, ...Array.from(state.players.values())];
+  
+  for (const player of allPlayers) {
+    if (!player.avatarUrl || !avatarImageCache.has(player.avatarUrl)) continue;
+    
+    // Viewport culling - only draw players visible on screen
+    const screenX = Math.round(player.x - camX);
+    const screenY = Math.round(player.y - camY);
+    const avatarSize = 64; // Approximate avatar size for culling
+    if (screenX < -avatarSize || screenX > vw + avatarSize || 
+        screenY < -avatarSize || screenY > vh + avatarSize) {
+      continue; // Skip this player - not visible
+    }
+    
+    const flipHorizontal = player.facing === 'west';
+    const surface = getAvatarSurface(player.avatarUrl, player.avatarWidth, player.avatarHeight, flipHorizontal);
     if (surface) {
-      const screenX = Math.round(me.x - camX);
-      const screenY = Math.round(me.y - camY);
       const drawX = Math.round(screenX - surface.width / 2);
       const drawY = Math.round(screenY - surface.height / 2);
       ctx.drawImage(surface.canvas, drawX, drawY);
 
       // Label centered above avatar
-      const label = getLabel(me.username);
+      const label = getLabel(player.username);
       const labelX = Math.round(screenX - label.width / 2);
       const labelY = Math.round(drawY - label.height - 6);
       ctx.drawImage(label.canvas, labelX, labelY);
@@ -499,8 +541,26 @@ function connectWebSocket() {
             state.avatars.set(avatarName, avatarDef);
           }
           
-          // Set initial avatar frame
-          updateAvatarFrame();
+          // Store all other players
+          for (const [playerId, playerData] of Object.entries(players)) {
+            if (playerId !== state.me.id) {
+              state.players.set(playerId, {
+                id: playerData.id,
+                username: playerData.username,
+                x: playerData.x,
+                y: playerData.y,
+                facing: playerData.facing || 'south',
+                animationFrame: playerData.animationFrame || 0,
+                avatarName: playerData.avatar,
+                avatarUrl: null, // Will be set when we get the frame
+                avatarWidth: undefined,
+                avatarHeight: undefined,
+              });
+            }
+          }
+          
+          // Set initial avatar frames for all players
+          updateAllPlayerFrames();
           
           // No explicit size -> render at natural size while preserving aspect ratio
           state.me.avatarWidth = undefined;
@@ -508,29 +568,77 @@ function connectWebSocket() {
           state.hasMe = true;
           if (state.me.avatarUrl) {
             await loadImageCached(state.me.avatarUrl);
-            state.hasAvatar = true;
           }
+          state.hasAvatar = true; // Set to true regardless, since we have avatar data
         }
         state.ready = Boolean(worldLoaded && state.hasMe && state.hasAvatar);
         requestRender();
         return;
       }
-      // Some servers may stream avatar frames after initial join
-      if (data.action === 'player_joined' && data.player && data.player.id === state.me.id && data.avatar) {
-        const facing = 'south';
-        const frames = data.avatar.frames && (data.avatar.frames[facing] || data.avatar.frames['east'] || data.avatar.frames['south']);
-        const frameUrl = frames && (frames[0] || null);
-        if (frameUrl && !state.hasAvatar) {
-          state.me.avatarUrl = frameUrl;
-          await loadImageCached(state.me.avatarUrl);
-          state.hasAvatar = true;
-          state.ready = Boolean(worldLoaded && state.hasMe && state.hasAvatar);
-          requestRender();
+      
+      // Handle player movement updates
+      if (data.action === 'players_moved' && data.players) {
+        for (const [playerId, playerData] of Object.entries(data.players)) {
+          if (playerId === state.me.id) {
+            // Only update my position from server if I'm not currently moving
+            // and enough time has passed since I stopped (to allow server to catch up)
+            const timeSinceStop = Date.now() - state.lastStopTime;
+            if (state.pressedKeys.size === 0 && timeSinceStop > 100) {
+              state.me.x = playerData.x;
+              state.me.y = playerData.y;
+            }
+            state.me.facing = playerData.facing || state.me.facing;
+            state.me.animationFrame = playerData.animationFrame || state.me.animationFrame;
+            updateAvatarFrame();
+          } else {
+            // Update other players (server is always authoritative for them)
+            const player = state.players.get(playerId);
+            if (player) {
+              player.x = playerData.x;
+              player.y = playerData.y;
+              player.facing = playerData.facing || player.facing;
+              player.animationFrame = playerData.animationFrame || player.animationFrame;
+              updatePlayerFrame(player);
+            }
+          }
         }
         requestRender();
         return;
       }
-      // Future: handle world state updates and other players
+      
+      // Handle new player joining
+      if (data.action === 'player_joined' && data.player && data.avatar) {
+        const playerId = data.player.id;
+        if (playerId !== state.me.id) {
+          state.players.set(playerId, {
+            id: data.player.id,
+            username: data.player.username,
+            x: data.player.x,
+            y: data.player.y,
+            facing: data.player.facing || 'south',
+            animationFrame: data.player.animationFrame || 0,
+            avatarName: data.player.avatar,
+            avatarUrl: null,
+            avatarWidth: undefined,
+            avatarHeight: undefined,
+          });
+          
+          // Store the new avatar definition
+          state.avatars.set(data.avatar.name, data.avatar);
+          
+          // Set the player's avatar frame
+          updatePlayerFrame(state.players.get(playerId));
+          requestRender();
+        }
+        return;
+      }
+      
+      // Handle player leaving
+      if (data.action === 'player_left' && data.playerId) {
+        state.players.delete(data.playerId);
+        requestRender();
+        return;
+      }
     } catch (err) {
       // Ignore malformed messages for now
     }
