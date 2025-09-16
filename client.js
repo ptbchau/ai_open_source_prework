@@ -52,6 +52,8 @@ const state = {
   moveSpeed: 200, // pixels per second
   avatars: new Map(), // avatarName -> {frames: {north: [...], south: [...], east: [...]}}
   lastStopTime: 0, // Track when we last stopped moving
+  clickTarget: null, // {x, y} world coordinates for click-to-move target
+  lastClickTime: 0, // Track when we last clicked to move
 };
 
 function setCanvasSize() {
@@ -200,6 +202,7 @@ function handleKeyDown(event) {
   
   if (direction && !state.pressedKeys.has(direction)) {
     state.pressedKeys.add(direction);
+    state.clickTarget = null; // Clear click target when using keyboard
     sendMove(direction);
     event.preventDefault();
   }
@@ -239,8 +242,18 @@ function sendStop() {
 }
 
 function updateMovement(deltaTime) {
-  if (state.pressedKeys.size === 0) return;
+  // Handle keyboard movement
+  if (state.pressedKeys.size > 0) {
+    updateKeyboardMovement(deltaTime);
+  }
   
+  // Handle click-to-move
+  if (state.clickTarget) {
+    updateClickMovement(deltaTime);
+  }
+}
+
+function updateKeyboardMovement(deltaTime) {
   const speed = state.moveSpeed * deltaTime; // pixels this frame
   let dx = 0, dy = 0;
   
@@ -285,9 +298,91 @@ function updateMovement(deltaTime) {
   requestRender();
 }
 
+function updateClickMovement(deltaTime) {
+  if (!state.clickTarget) return;
+  
+  const speed = state.moveSpeed * deltaTime;
+  const dx = state.clickTarget.x - state.me.x;
+  const dy = state.clickTarget.y - state.me.y;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  
+  // If we're close enough, stop moving
+  if (distance < 5) {
+    state.clickTarget = null;
+    sendStop();
+    return;
+  }
+  
+  // Move towards target
+  const moveX = (dx / distance) * speed;
+  const moveY = (dy / distance) * speed;
+  
+  // Update facing direction based on movement
+  if (Math.abs(dx) > Math.abs(dy)) {
+    state.me.facing = dx > 0 ? 'east' : 'west';
+  } else {
+    state.me.facing = dy > 0 ? 'south' : 'north';
+  }
+  
+  // Update animation frame
+  state.me.animationFrame = (state.me.animationFrame + 1) % 3;
+  
+  // Update position
+  if (worldLoaded) {
+    const worldW = worldImage.naturalWidth;
+    const worldH = worldImage.naturalHeight;
+    state.me.x = clamp(state.me.x + moveX, 0, worldW);
+    state.me.y = clamp(state.me.y + moveY, 0, worldH);
+  } else {
+    state.me.x += moveX;
+    state.me.y += moveY;
+  }
+  
+  updateAvatarFrame();
+  requestRender();
+}
+
 function clearMovement() {
   state.pressedKeys.clear();
+  state.clickTarget = null;
   sendStop();
+}
+
+function handleCanvasClick(event) {
+  if (!state.ready) return;
+  
+  // Get click position relative to canvas
+  const rect = canvas.getBoundingClientRect();
+  const clickX = event.clientX - rect.left;
+  const clickY = event.clientY - rect.top;
+  
+  // Convert screen coordinates to world coordinates
+  const worldX = clickX + state.camera.x;
+  const worldY = clickY + state.camera.y;
+  
+  // Clamp to world bounds
+  if (worldLoaded) {
+    const worldW = worldImage.naturalWidth;
+    const worldH = worldImage.naturalHeight;
+    const clampedX = clamp(worldX, 0, worldW);
+    const clampedY = clamp(worldY, 0, worldH);
+    
+    // Set click target
+    state.clickTarget = { x: clampedX, y: clampedY };
+    state.lastClickTime = Date.now();
+    
+    // Send click-to-move message to server
+    sendClickMove(clampedX, clampedY);
+    
+    // Clear keyboard movement
+    state.pressedKeys.clear();
+  }
+}
+
+function sendClickMove(x, y) {
+  if (!state.connected || !socket) return;
+  const message = { action: 'move', x: Math.round(x), y: Math.round(y) };
+  socket.send(JSON.stringify(message));
 }
 
 function updateAvatarFrame() {
@@ -516,6 +611,42 @@ function render() {
       ctx.drawImage(label.canvas, labelX, labelY);
     }
   }
+  
+  // Draw click target indicator
+  if (state.clickTarget) {
+    const targetScreenX = Math.round(state.clickTarget.x - camX);
+    const targetScreenY = Math.round(state.clickTarget.y - camY);
+    
+    // Only draw if target is visible on screen
+    if (targetScreenX >= -20 && targetScreenX <= vw + 20 && 
+        targetScreenY >= -20 && targetScreenY <= vh + 20) {
+      
+      // Draw pulsing circle at click target
+      const time = Date.now() * 0.005;
+      const pulse = Math.sin(time) * 0.3 + 0.7; // 0.4 to 1.0
+      const radius = 8 * pulse;
+      
+      ctx.save();
+      ctx.globalAlpha = pulse;
+      ctx.strokeStyle = '#00ff00';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(targetScreenX, targetScreenY, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      
+      // Draw crosshair
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = '#00ff00';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(targetScreenX - 12, targetScreenY);
+      ctx.lineTo(targetScreenX + 12, targetScreenY);
+      ctx.moveTo(targetScreenX, targetScreenY - 12);
+      ctx.lineTo(targetScreenX, targetScreenY + 12);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
 }
 
 function computeAvatarDrawSize(img, targetW, targetH) {
@@ -668,9 +799,25 @@ function connectWebSocket() {
             // Only update my position from server if I'm not currently moving
             // and enough time has passed since I stopped (to allow server to catch up)
             const timeSinceStop = Date.now() - state.lastStopTime;
+            const timeSinceClick = Date.now() - state.lastClickTime;
             if (state.pressedKeys.size === 0 && timeSinceStop > 100) {
-              state.me.x = playerData.x;
-              state.me.y = playerData.y;
+              // Don't update position if we have a click target (click-to-move is active)
+              // or if we recently clicked (within 200ms)
+              if (!state.clickTarget && timeSinceClick > 200) {
+                state.me.x = playerData.x;
+                state.me.y = playerData.y;
+              }
+              
+              // Clear click target if we've reached it (within 10 pixels)
+              if (state.clickTarget) {
+                const distance = Math.sqrt(
+                  Math.pow(state.me.x - state.clickTarget.x, 2) + 
+                  Math.pow(state.me.y - state.clickTarget.y, 2)
+                );
+                if (distance < 10) {
+                  state.clickTarget = null;
+                }
+              }
             }
             state.me.facing = playerData.facing || state.me.facing;
             state.me.animationFrame = playerData.animationFrame || state.me.animationFrame;
@@ -749,6 +896,7 @@ window.addEventListener('blur', clearMovement);
 window.addEventListener('visibilitychange', () => {
   if (document.hidden) clearMovement();
 });
+canvas.addEventListener('click', handleCanvasClick);
 computeCamera();
 connectWebSocket();
 tick();
