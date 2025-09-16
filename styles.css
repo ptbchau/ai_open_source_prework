@@ -13,4 +13,17 @@ html, body {
   height: 100vh;
 }
 
+#minimap-canvas {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  width: 200px;
+  height: 200px;
+  border: 2px solid #333;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 8px;
+  z-index: 1000;
+  pointer-events: none; /* Don't interfere with main canvas clicks */
+}
+
 

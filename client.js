@@ -4,6 +4,10 @@
 const canvas = document.getElementById('world-canvas');
 const ctx = canvas.getContext('2d');
 
+// Mini-map canvas
+const minimapCanvas = document.getElementById('minimap-canvas');
+const minimapCtx = minimapCanvas.getContext('2d');
+
 // Device pixel ratio handling for crisp rendering
 let devicePixelRatioValue = Math.max(1, Math.floor(window.devicePixelRatio || 1));
 
@@ -54,6 +58,7 @@ const state = {
   lastStopTime: 0, // Track when we last stopped moving
   clickTarget: null, // {x, y} world coordinates for click-to-move target
   lastClickTime: 0, // Track when we last clicked to move
+  minimapNeedsUpdate: true, // Track if mini-map needs redraw
 };
 
 function setCanvasSize() {
@@ -88,6 +93,9 @@ function computeCamera() {
   // No centering offsets near edges; avatar will drift from center
   delete state.camera.offsetX;
   delete state.camera.offsetY;
+  
+  // Trigger mini-map update when camera moves
+  state.minimapNeedsUpdate = true;
 }
 
 function loadImageCached(url) {
@@ -340,6 +348,7 @@ function updateClickMovement(deltaTime) {
   
   updateAvatarFrame();
   requestRender();
+  state.minimapNeedsUpdate = true;
 }
 
 function clearMovement() {
@@ -649,6 +658,56 @@ function render() {
   }
 }
 
+function renderMiniMap() {
+  if (!state.minimapNeedsUpdate || !worldLoaded) return;
+  state.minimapNeedsUpdate = false;
+  
+  const minimapSize = 200;
+  const worldW = worldImage.naturalWidth;
+  const worldH = worldImage.naturalHeight;
+  
+  // Set mini-map canvas size
+  minimapCanvas.width = minimapSize;
+  minimapCanvas.height = minimapSize;
+  
+  // Clear mini-map
+  minimapCtx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+  minimapCtx.fillRect(0, 0, minimapSize, minimapSize);
+  
+  // Draw world map scaled to mini-map size
+  minimapCtx.drawImage(worldImage, 0, 0, minimapSize, minimapSize);
+  
+  // Draw camera viewport indicator
+  const scaleX = minimapSize / worldW;
+  const scaleY = minimapSize / worldH;
+  const viewportX = state.camera.x * scaleX;
+  const viewportY = state.camera.y * scaleY;
+  const viewportW = state.viewport.width * scaleX;
+  const viewportH = state.viewport.height * scaleY;
+  
+  minimapCtx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+  minimapCtx.lineWidth = 2;
+  minimapCtx.strokeRect(viewportX, viewportY, viewportW, viewportH);
+  
+  // Draw all players
+  const allPlayers = [state.me, ...Array.from(state.players.values())];
+  for (const player of allPlayers) {
+    const playerX = player.x * scaleX;
+    const playerY = player.y * scaleY;
+    
+    // Different colors for me vs other players
+    if (player.id === state.me.id) {
+      minimapCtx.fillStyle = '#00ff00'; // Green for me
+    } else {
+      minimapCtx.fillStyle = '#ff0000'; // Red for others
+    }
+    
+    minimapCtx.beginPath();
+    minimapCtx.arc(playerX, playerY, 3, 0, Math.PI * 2);
+    minimapCtx.fill();
+  }
+}
+
 function computeAvatarDrawSize(img, targetW, targetH) {
   const naturalW = img.naturalWidth || targetW || 64;
   const naturalH = img.naturalHeight || targetH || 64;
@@ -675,6 +734,7 @@ function tick(currentTime) {
   updateMovement(deltaTime);
   
   render();
+  renderMiniMap();
   requestAnimationFrame(tick);
 }
 
@@ -789,6 +849,7 @@ function connectWebSocket() {
         }
         state.ready = Boolean(worldLoaded && state.hasMe && state.hasAvatar);
         requestRender();
+        state.minimapNeedsUpdate = true;
         return;
       }
       
@@ -835,6 +896,7 @@ function connectWebSocket() {
           }
         }
         requestRender();
+        state.minimapNeedsUpdate = true;
         return;
       }
       
@@ -861,6 +923,7 @@ function connectWebSocket() {
           // Set the player's avatar frame
           updatePlayerFrame(state.players.get(playerId));
           requestRender();
+          state.minimapNeedsUpdate = true;
         }
         return;
       }
@@ -869,6 +932,7 @@ function connectWebSocket() {
       if (data.action === 'player_left' && data.playerId) {
         state.players.delete(data.playerId);
         requestRender();
+        state.minimapNeedsUpdate = true;
         return;
       }
     } catch (err) {
