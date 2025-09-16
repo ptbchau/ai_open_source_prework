@@ -2,7 +2,7 @@
 
 A web-based multiplayer game where players can explore a shared world, move around, and interact with other players in real-time.
 
-![Animation of game demo](demo.mp4)
+![Animation of game demo](demo.gif)
 
 ## 🎮 Features
 
@@ -87,7 +87,7 @@ mmorpg-client/
 ├── styles.css                            # Styling and layout
 ├── world.jpg                             # Game world map (2048x2048)
 ├── mmorpg.gif                            # Demo animation (from game server)
-├── demo.gif                              # Demo animation (from game client)
+├── demo.gif                              # Demo animation (converted from MP4)
 └── README_game-server-instruction.md     # Instruction to connect to game server
 └── README.md                             # This file
 ```
